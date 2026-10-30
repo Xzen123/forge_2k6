@@ -56,9 +56,14 @@ export default function SourcesPanel() {
               <SourceRow key={s.name} source={s} label={sourceNames[s.name] || s.name} />
             ))}
             {sources.length === 0 && (
-              <p className="text-xs text-slate-500 text-center py-2">
-                No source data yet. Ingestion running...
-              </p>
+              <div className="text-center py-3 space-y-1">
+                <p className="text-xs text-amber-400/90 font-medium">
+                  Connecting to API...
+                </p>
+                <p className="text-[11px] text-slate-500">
+                  Ensure backend is started on <code className="text-slate-400">http://localhost:8000</code>
+                </p>
+              </div>
             )}
           </div>
         )}
