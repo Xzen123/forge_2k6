@@ -13,6 +13,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import packages  # noqa: F401 (initializes pure-python shims if needed)
 import asyncio
 import json
 import os
@@ -22,7 +23,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
-import anthropic
 import structlog
 from fastapi import (
     BackgroundTasks,

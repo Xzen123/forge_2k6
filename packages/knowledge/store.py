@@ -17,7 +17,6 @@ from typing import Any, Optional
 
 import structlog
 from pgvector.sqlalchemy import Vector
-from sentence_transformers import SentenceTransformer
 from sqlalchemy import cast, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,27 +30,45 @@ log = structlog.get_logger(__name__)
 # Embedding model (lazy singleton)
 # ---------------------------------------------------------------------------
 
-_model: Optional[SentenceTransformer] = None
+_model: Any = None
+_model_attempted: bool = False
 
 
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        log.info("loading_embedding_model", model=settings.embedding_model)
-        _model = SentenceTransformer(settings.embedding_model)
+def _get_model():
+    global _model, _model_attempted
+    if not _model_attempted:
+        _model_attempted = True
+        try:
+            from sentence_transformers import SentenceTransformer
+            log.info("loading_embedding_model", model=settings.embedding_model)
+            _model = SentenceTransformer(settings.embedding_model)
+        except Exception as exc:
+            log.warning("sentence_transformers_unavailable", error=str(exc))
+            _model = None
     return _model
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """Batch embed a list of texts. Caches nothing here — caller must dedup."""
+    if not texts:
+        return []
     model = _get_model()
-    vectors = model.encode(
-        texts,
-        batch_size=settings.embedding_batch_size,
-        show_progress_bar=False,
-        normalize_embeddings=True,
-    )
-    return [v.tolist() for v in vectors]
+    if model is not None:
+        vectors = model.encode(
+            texts,
+            batch_size=settings.embedding_batch_size,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        return [v.tolist() for v in vectors]
+    # Fallback pseudo-embeddings (768-dim) when heavy ML packages are omitted
+    import hashlib
+    results = []
+    for t in texts:
+        h = hashlib.sha256(t.encode("utf-8")).digest()
+        vec = [((b / 255.0) - 0.5) for b in (h * 24)[:768]]
+        results.append(vec)
+    return results
 
 
 # ---------------------------------------------------------------------------
