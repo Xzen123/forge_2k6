@@ -1,0 +1,58 @@
+# Civic Pulse — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# --- Web framework ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+sse-starlette==2.1.3
+
+# --- Validation / settings ---
+pydantic==2.9.2
+pydantic-settings==2.5.2
+
+# --- Database ---
+sqlalchemy==2.0.36
+asyncpg==0.29.0
+alembic==1.13.3
+pgvector==0.3.5
+
+# --- HTTP client ---
+httpx==0.27.2
+tenacity==9.0.0
+
+# --- LLM ---
+anthropic==0.37.1
+langchain-core==0.3.15
+langgraph==0.2.39
+
+# --- Embeddings (local) ---
+sentence-transformers==3.2.1
+torch==2.4.1
+
+# --- Ingestion ---
+trafilatura==1.12.2
+beautifulsoup4==4.12.3
+lxml==5.3.0
+feedparser==6.0.11
+playwright==1.48.0
+pymupdf==1.24.13
+pytesseract==0.3.13
+Pillow==10.4.0
+
+# --- Scheduling ---
+apscheduler==3.10.4
+
+# --- Language detection ---
+langdetect==1.0.9
+
+# --- Observability ---
+langfuse==2.53.1
+structlog==24.4.0
+
+# --- Dev / test ---
+pytest==8.3.3
+pytest-asyncio==0.24.0
+pytest-httpx==0.32.0
+ruff==0.7.1
+mypy==1.13.0

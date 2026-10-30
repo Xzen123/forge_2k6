@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: civic_pulse_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-civic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-civic}
+      POSTGRES_DB: ${POSTGRES_DB:-civic_pulse}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-civic} -d ${POSTGRES_DB:-civic_pulse}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    container_name: civic_pulse_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-civic}:${POSTGRES_PASSWORD:-civic}@db:5432/${POSTGRES_DB:-civic_pulse}
+    ports:
+      - "8000:8000"
+    volumes:
+      - tts_cache:/tmp/civic_pulse_tts_cache
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    container_name: civic_pulse_scheduler
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-civic}:${POSTGRES_PASSWORD:-civic}@db:5432/${POSTGRES_DB:-civic_pulse}
+    command: python -m apps.api.scheduler
+
+volumes:
+  pgdata:
+  tts_cache:
