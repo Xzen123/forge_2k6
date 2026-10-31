@@ -21,8 +21,9 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 
+import anthropic
 import structlog
 from fastapi import (
     BackgroundTasks,
@@ -62,7 +63,7 @@ from packages.knowledge.db import (
     get_db,
 )
 from packages.knowledge.schemas import AgentState, UserProfile
-from packages.lang.voice import SarvamSTT, SarvamTranslator, SarvamTTS, detect_language
+from packages.lang.voice import SarvamSTT, SarvamTranslator, SarvamTTS, detect_language, clean_text_for_speech
 
 log = structlog.get_logger(__name__)
 
@@ -137,6 +138,7 @@ class ChatRequest(BaseModel):
     session_id: str
     text: Optional[str] = None
     language: Optional[str] = None
+    reset_profile: Optional[bool] = False
 
 
 class SourceInfo(BaseModel):
@@ -154,25 +156,46 @@ class ChangeEvent(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Helper: get or create session
+# Helper: get or create session (with in-memory fallback if DB is unreachable)
 # ---------------------------------------------------------------------------
 
 
-async def _get_or_create_session(session_id: str, db: AsyncSession) -> SessionModel:
-    result = await db.execute(select(SessionModel).where(SessionModel.id == session_id))
-    session = result.scalar_one_or_none()
-    if session is None:
-        session = SessionModel(
-            id=session_id,
-            profile_json={},
-            history_json=[],
-            language="en",
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-        )
-        db.add(session)
-        await db.flush()
-    return session
+class MemorySession:
+    """In-memory fallback session when PostgreSQL is offline or unreachable."""
+
+    def __init__(self, session_id: str):
+        self.id = session_id
+        self.profile_json: dict = {}
+        self.history_json: list = []
+        self.language: str = "en"
+        self.created_at = datetime.now(timezone.utc)
+        self.updated_at = datetime.now(timezone.utc)
+
+
+_IN_MEMORY_SESSIONS: dict[str, MemorySession] = {}
+
+
+async def _get_or_create_session(session_id: str, db: AsyncSession) -> Any:
+    try:
+        result = await db.execute(select(SessionModel).where(SessionModel.id == session_id))
+        session = result.scalar_one_or_none()
+        if session is None:
+            session = SessionModel(
+                id=session_id,
+                profile_json={},
+                history_json=[],
+                language="en",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            db.add(session)
+            await db.flush()
+        return session
+    except Exception as exc:
+        log.warning("db_session_unavailable_using_memory_fallback", session_id=session_id, error=str(exc))
+        if session_id not in _IN_MEMORY_SESSIONS:
+            _IN_MEMORY_SESSIONS[session_id] = MemorySession(session_id)
+        return _IN_MEMORY_SESSIONS[session_id]
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +225,7 @@ async def chat(request: Request, body: ChatRequest, db: AsyncSession = Depends(g
 
     # Load session
     session = await _get_or_create_session(body.session_id, db)
-    profile_data = session.profile_json or {}
+    profile_data = {} if body.reset_profile else (session.profile_json or {})
     profile = UserProfile(**profile_data)
     profile.language = lang
 
@@ -217,10 +240,25 @@ async def chat(request: Request, body: ChatRequest, db: AsyncSession = Depends(g
     graph = build_graph(db)
 
     async def event_stream() -> AsyncIterator[dict]:
+        final_state = state
         try:
-            async for event in graph.astream(state, stream_mode="updates"):
-                for node_name, node_state in event.items():
+            async for event in graph.astream(state, stream_mode="updates", config={"recursion_limit": 25}):
+                for node_name, raw_node_state in event.items():
+                    node_state = (
+                        AgentState(**raw_node_state)
+                        if isinstance(raw_node_state, dict)
+                        else raw_node_state
+                    )
                     if isinstance(node_state, AgentState):
+                        final_state = node_state
+
+                        # Emit profile_update as soon as intake finishes
+                        if node_name == "intake" or (node_state.trace and node_state.trace[-1].step == "intake"):
+                            yield {
+                                "event": "profile_update",
+                                "data": json.dumps(node_state.profile.model_dump(mode="json")),
+                            }
+
                         # Emit the latest trace event
                         if node_state.trace:
                             last = node_state.trace[-1]
@@ -236,14 +274,11 @@ async def chat(request: Request, body: ChatRequest, db: AsyncSession = Depends(g
                             }
 
                         # Emit followup question if state ends with one
-                        if last.step == "ask_followup":
+                        if node_state.trace and node_state.trace[-1].step == "ask_followup":
                             yield {
                                 "event": "followup_question",
                                 "data": json.dumps({"question": node_state.final_answer}),
                             }
-
-            # Final state
-            final_state = node_state if isinstance(node_state, AgentState) else state
 
             # Persist updated session
             session.profile_json = final_state.profile.model_dump()
@@ -260,7 +295,14 @@ async def chat(request: Request, body: ChatRequest, db: AsyncSession = Depends(g
             })
             session.history_json = history[-40:]  # keep last 20 turns
             session.updated_at = datetime.now(timezone.utc)
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception as exc:
+                log.warning("session_commit_fallback", error=str(exc))
+
+            if final_state.trace and final_state.trace[-1].step == "ask_followup":
+                # Followup question already dispatched via "followup_question" event; stream concludes for citizen reply
+                return
 
             final_answer = add_disclaimer(final_state.final_answer)
 
@@ -268,10 +310,10 @@ async def chat(request: Request, body: ChatRequest, db: AsyncSession = Depends(g
                 "event": "final_answer",
                 "data": json.dumps({
                     "text": final_answer,
-                    "claims": [c.model_dump() for c in final_state.claims],
+                    "claims": [c.model_dump(mode="json") for c in final_state.claims],
                     "language": final_state.detected_language,
                     "errors": final_state.errors,
-                }),
+                }, default=str),
             }
         except Exception as exc:
             log.error("stream_error", error=str(exc))
@@ -316,6 +358,129 @@ async def voice(request: Request, file: UploadFile = File(...), db: AsyncSession
 
 
 # ---------------------------------------------------------------------------
+# POST /tts — Sarvam AI Text-to-Speech
+# ---------------------------------------------------------------------------
+
+
+class TTSRequest(BaseModel):
+    text: str
+    language: Optional[str] = "hi"
+    clean_for_speech: Optional[bool] = True
+
+
+class TTSResponse(BaseModel):
+    audio_base64: str
+    mime_type: str = "audio/wav"
+    cached: bool
+    language: str
+    spoken_text: str
+
+
+_TTS_ENDPOINT_CACHE: dict[str, TTSResponse] = {}
+_SHARED_TTS_ENGINE: Optional[SarvamTTS] = None
+_SHARED_TRANSLATOR: Optional[SarvamTranslator] = None
+
+
+def get_shared_tts() -> SarvamTTS:
+    global _SHARED_TTS_ENGINE
+    if _SHARED_TTS_ENGINE is None:
+        _SHARED_TTS_ENGINE = SarvamTTS()
+    return _SHARED_TTS_ENGINE
+
+
+def get_shared_translator() -> SarvamTranslator:
+    global _SHARED_TRANSLATOR
+    if _SHARED_TRANSLATOR is None:
+        _SHARED_TRANSLATOR = SarvamTranslator()
+    return _SHARED_TRANSLATOR
+
+
+@app.post("/tts", response_model=TTSResponse)
+@limiter.limit(f"{settings.api_rate_limit_per_minute}/minute")
+async def tts(request: Request, body: TTSRequest):
+    """Synthesize text into authentic Indian regional speech using Sarvam AI Bulbul."""
+    target_lang = (body.language or "hi").lower()
+    raw_text = body.text or ""
+    if not raw_text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    spoken_text = clean_text_for_speech(raw_text) if body.clean_for_speech else raw_text.strip()
+    cache_key = f"{target_lang}:{spoken_text}"
+
+    # Return immediately from memory cache if available (< 2ms)
+    if cache_key in _TTS_ENDPOINT_CACHE:
+        cached_resp = _TTS_ENDPOINT_CACHE[cache_key]
+        return TTSResponse(
+            audio_base64=cached_resp.audio_base64,
+            mime_type=cached_resp.mime_type,
+            cached=True,
+            language=target_lang,
+            spoken_text=cached_resp.spoken_text,
+        )
+
+    # If the text is in English and target is regional (hi, bn, ta, te, etc.), translate for natural regional pronunciation
+    import re
+    has_indic = bool(re.search(r"[\u0900-\u0D7F]", spoken_text))
+    if not has_indic and target_lang not in ("en", "en-in"):
+        translator = get_shared_translator()
+        try:
+            translated = await translator.translate(spoken_text, source_lang="en", target_lang=target_lang)
+            if translated and len(translated.strip()) > 5:
+                spoken_text = translated
+        except Exception as exc:
+            log.warning("tts_translation_skipped", error=str(exc))
+
+    tts_engine = get_shared_tts()
+    audio_bytes = await tts_engine.synthesize(spoken_text, language=target_lang, clean=False)
+
+    if not audio_bytes:
+        raise HTTPException(status_code=502, detail="Speech synthesis failed")
+
+    import base64
+    audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+
+    response_obj = TTSResponse(
+        audio_base64=audio_b64,
+        mime_type="audio/wav",
+        cached=False,
+        language=target_lang,
+        spoken_text=spoken_text,
+    )
+    _TTS_ENDPOINT_CACHE[cache_key] = response_obj
+    return response_obj
+
+
+class TranslateRequest(BaseModel):
+    text: str
+    target_language: str = "hi"
+    source_language: str = "en"
+
+
+class TranslateResponse(BaseModel):
+    translated_text: str
+    target_language: str
+    cached: bool
+
+
+@app.post("/translate", response_model=TranslateResponse)
+@limiter.limit(f"{settings.api_rate_limit_per_minute}/minute")
+async def translate_text(request: Request, body: TranslateRequest):
+    """Translate civic advice and statutory rights into Indian regional languages using Sarvam Mayura."""
+    src = (body.source_language or "en").lower()
+    tgt = (body.target_language or "hi").lower()
+    raw = (body.text or "").strip()
+    if not raw:
+        return TranslateResponse(translated_text="", target_language=tgt, cached=True)
+
+    if src == tgt:
+        return TranslateResponse(translated_text=raw, target_language=tgt, cached=True)
+
+    translator = get_shared_translator()
+    translated = await translator.translate(raw, source_lang=src, target_lang=tgt)
+    return TranslateResponse(translated_text=translated, target_language=tgt, cached=False)
+
+
+# ---------------------------------------------------------------------------
 # GET /sources
 # ---------------------------------------------------------------------------
 
@@ -324,37 +489,45 @@ async def voice(request: Request, file: UploadFile = File(...), db: AsyncSession
 async def get_sources(db: AsyncSession = Depends(get_db)):
     """Return per-source status: last success, doc count, stale flag."""
     sources = []
-    for name in _ADAPTERS:
-        # Last successful run
-        run_result = await db.execute(
-            select(IngestionRunModel)
-            .where(IngestionRunModel.source == name, IngestionRunModel.success.is_(True))
-            .order_by(desc(IngestionRunModel.ended_at))
-            .limit(1)
-        )
-        last_run = run_result.scalar_one_or_none()
-        last_success_at = last_run.ended_at if last_run else None
-
-        # Doc count
-        count_result = await db.execute(
-            select(func.count(DocumentModel.id)).where(
-                DocumentModel.source == name, DocumentModel.is_latest.is_(True)
+    try:
+        for name in _ADAPTERS:
+            # Last successful run
+            run_result = await db.execute(
+                select(IngestionRunModel)
+                .where(IngestionRunModel.source == name, IngestionRunModel.success.is_(True))
+                .order_by(desc(IngestionRunModel.ended_at))
+                .limit(1)
             )
-        )
-        doc_count = count_result.scalar() or 0
+            last_run = run_result.scalar_one_or_none()
+            last_success_at = last_run.ended_at if last_run else None
 
-        # Stale: no success in last 2 * interval
-        stale = True
-        if last_success_at:
-            elapsed = (datetime.now(timezone.utc) - last_success_at).total_seconds()
-            stale = elapsed > settings.ingest_interval_minutes * 60 * 2
+            # Doc count
+            count_result = await db.execute(
+                select(func.count(DocumentModel.id)).where(
+                    DocumentModel.source == name, DocumentModel.is_latest.is_(True)
+                )
+            )
+            doc_count = count_result.scalar() or 0
 
-        sources.append(SourceInfo(
-            name=name,
-            last_success_at=last_success_at,
-            document_count=doc_count,
-            stale=stale,
-        ))
+            # Stale: no success in last 2 * interval
+            stale = True
+            if last_success_at:
+                elapsed = (datetime.now(timezone.utc) - last_success_at).total_seconds()
+                stale = elapsed > settings.ingest_interval_minutes * 60 * 2
+
+            sources.append(SourceInfo(
+                name=name,
+                last_success_at=last_success_at,
+                document_count=doc_count,
+                stale=stale,
+            ))
+    except Exception as exc:
+        log.warning("sources_db_unavailable_degraded", error=str(exc))
+        # Graceful degradation per M5 failure matrix
+        return [
+            SourceInfo(name=name, last_success_at=None, document_count=0, stale=True)
+            for name in _ADAPTERS
+        ]
     return sources
 
 
@@ -366,21 +539,25 @@ async def get_sources(db: AsyncSession = Depends(get_db)):
 @app.get("/changes", response_model=list[ChangeEvent])
 async def get_changes(db: AsyncSession = Depends(get_db), limit: int = 20):
     """Return recent document_changed audit events."""
-    result = await db.execute(
-        select(AuditLogModel)
-        .where(AuditLogModel.event_type == "document_changed")
-        .order_by(desc(AuditLogModel.created_at))
-        .limit(min(limit, 100))
-    )
-    events = []
-    for row in result.scalars().all():
-        events.append(ChangeEvent(
-            source=row.source,
-            document_id=str(row.document_id) if row.document_id else None,
-            diff_summary=row.payload.get("diff_summary", ""),
-            occurred_at=row.created_at,
-        ))
-    return events
+    try:
+        result = await db.execute(
+            select(AuditLogModel)
+            .where(AuditLogModel.event_type == "document_changed")
+            .order_by(desc(AuditLogModel.created_at))
+            .limit(min(limit, 100))
+        )
+        events = []
+        for row in result.scalars().all():
+            events.append(ChangeEvent(
+                source=row.source,
+                document_id=str(row.document_id) if row.document_id else None,
+                diff_summary=row.payload.get("diff_summary", ""),
+                occurred_at=row.created_at,
+            ))
+        return events
+    except Exception as exc:
+        log.warning("changes_db_unavailable_degraded", error=str(exc))
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +574,7 @@ async def health(db: AsyncSession = Depends(get_db)):
         await db.execute(select(1))
         db_ok = True
     except Exception as exc:
-        log.error("health_db_failed", error=str(exc))
+        log.warning("health_db_unavailable", error=str(exc))
 
     # LLM check
     llm_ok = False
@@ -410,21 +587,22 @@ async def health(db: AsyncSession = Depends(get_db)):
         )
         llm_ok = True
     except Exception as exc:
-        log.error("health_llm_failed", error=str(exc))
+        log.warning("health_llm_unavailable", error=str(exc))
 
     # Last ingestion
     last_ingest: Optional[datetime] = None
-    try:
-        result = await db.execute(
-            select(IngestionRunModel)
-            .where(IngestionRunModel.success.is_(True))
-            .order_by(desc(IngestionRunModel.ended_at))
-            .limit(1)
-        )
-        run = result.scalar_one_or_none()
-        last_ingest = run.ended_at if run else None
-    except Exception:
-        pass
+    if db_ok:
+        try:
+            result = await db.execute(
+                select(IngestionRunModel)
+                .where(IngestionRunModel.success.is_(True))
+                .order_by(desc(IngestionRunModel.ended_at))
+                .limit(1)
+            )
+            run = result.scalar_one_or_none()
+            last_ingest = run.ended_at if run else None
+        except Exception:
+            pass
 
     return {
         "status": "ok" if (db_ok and llm_ok) else "degraded",
@@ -442,15 +620,21 @@ async def health(db: AsyncSession = Depends(get_db)):
 
 @app.get("/session/{session_id}")
 async def get_session(session_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(SessionModel).where(SessionModel.id == session_id))
-    session = result.scalar_one_or_none()
+    session = None
+    try:
+        result = await db.execute(select(SessionModel).where(SessionModel.id == session_id))
+        session = result.scalar_one_or_none()
+    except Exception as exc:
+        log.warning("get_session_db_unavailable", error=str(exc))
+        session = _IN_MEMORY_SESSIONS.get(session_id)
+
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return {
         "session_id": session.id,
-        "profile": session.profile_json,
-        "history": session.history_json,
-        "language": session.language,
+        "profile": getattr(session, "profile_json", {}),
+        "history": getattr(session, "history_json", []),
+        "language": getattr(session, "language", "en"),
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     }
