@@ -32,11 +32,14 @@ from packages.config import settings
 # Engine + session factory
 # ---------------------------------------------------------------------------
 
+_connect_args = {"timeout": 2.0} if "postgresql" in settings.database_url else {}
+
 engine = create_async_engine(
     settings.database_url,
     pool_size=settings.database_pool_size,
     max_overflow=settings.database_max_overflow,
     echo=settings.environment == "development",
+    connect_args=_connect_args,
 )
 
 AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
@@ -45,9 +48,21 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
 
 
 async def get_db() -> AsyncSession:  # type: ignore[override]
-    """FastAPI dependency that yields a database session."""
-    async with AsyncSessionLocal() as session:
+    """FastAPI dependency that yields a database session or None if DB is unreachable."""
+    session = None
+    try:
+        session = AsyncSessionLocal()
+    except Exception:
+        session = None
+
+    try:
         yield session
+    finally:
+        if session is not None:
+            try:
+                await session.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
