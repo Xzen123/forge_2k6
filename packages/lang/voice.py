@@ -36,6 +36,15 @@ _LANG_CODE_MAP = {
     "hi": "hi-IN",
     "bn": "bn-IN",
     "en": "en-IN",
+    "ta": "ta-IN",
+    "te": "te-IN",
+    "mr": "mr-IN",
+    "gu": "gu-IN",
+    "kn": "kn-IN",
+    "ml": "ml-IN",
+    "pa": "pa-IN",
+    "od": "od-IN",
+    "as": "as-IN",
 }
 
 # Terms that must never be machine-translated (scheme names, numbers, etc.)
@@ -43,6 +52,97 @@ _GLOSSARY_PATTERNS = [
     "PM-KISAN", "PMJAY", "MGNREGS", "PMAY", "NSP",
     "PAN", "Aadhaar", "OBC", "SC", "ST", "EWS",
 ]
+
+_TTS_MEM_CACHE: dict[str, bytes] = {}
+_TRANSLATE_MEM_CACHE: dict[str, str] = {}
+
+
+def clean_text_for_speech(text: str, max_chars: int = 420) -> str:
+    """Extracts an authoritative, solution-oriented spoken script from rich markdown.
+    Prioritizes concrete schemes, financial allowances, and direct application steps rather
+    than merely echoing the demographic problem statement.
+    """
+    import re
+    if not text or not text.strip():
+        return ""
+
+    # 1. Parse Scheme Mapping Table Rows: | **Scheme** | Body | Criteria | Benefits |
+    table_schemes: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("|") and "**" in line_s:
+            parts = [p.strip() for p in line_s.split("|") if p.strip()]
+            if len(parts) >= 2:
+                raw_scheme = parts[0].replace("**", "").replace("*", "").strip()
+                raw_benefits = parts[-1].replace("**", "").replace("*", "").strip()
+                if raw_scheme and raw_benefits and not raw_scheme.lower().startswith("scholarship") and not raw_benefits.lower().startswith("financial"):
+                    table_schemes.append((raw_scheme, raw_benefits))
+
+    # 2. Parse Bulleted Direct Solutions: • **Scheme**: Benefit
+    bullet_schemes: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        line_s = line.strip()
+        bullet_match = re.search(r"^[•\*\-]\s+\*\*([^*]+)\*\*[:\s—\-]+(.+)", line_s)
+        if bullet_match:
+            s_name = bullet_match.group(1).strip()
+            s_ben = bullet_match.group(2).strip()
+            if s_name and s_ben and not s_name.lower().startswith("primary benefit") and not s_name.lower().startswith("one scheme") and not s_name.lower().startswith("aadhaar"):
+                bullet_schemes.append((s_name, s_ben))
+
+    # 3. Look for Official Application Portal in the text
+    portal_match = re.search(r"(?:Visit|Apply on|Apply at)\s+\[?([a-zA-Z0-9\.\-]+\.(?:gov\.in|nic\.in|in))\]?", text, re.IGNORECASE)
+    portal_name = portal_match.group(1) if portal_match else "the official state portal"
+
+    # If we extracted concrete schemes from table or bullets, construct the solution script
+    target_schemes = table_schemes or bullet_schemes
+    if target_schemes:
+        speech_parts = []
+        top_scheme, top_benefit = target_schemes[0]
+        top_benefit = re.sub(r"\[CITATION:\d+\]", "", top_benefit).strip()
+        speech_parts.append(f"You qualify for {top_scheme}, providing {top_benefit}.")
+
+        if len(target_schemes) > 1:
+            second_scheme, second_benefit = target_schemes[1]
+            second_benefit = re.sub(r"\[CITATION:\d+\]", "", second_benefit).strip()
+            speech_parts.append(f"You can also access {second_scheme} for {second_benefit}.")
+
+        speech_parts.append(f"To apply, register at {portal_name} with your required documents and Aadhaar-seeded bank account.")
+        candidate_speech = " ".join(speech_parts)
+        if len(candidate_speech) <= max_chars:
+            return candidate_speech
+        else:
+            return candidate_speech[:max_chars].rsplit(".", 1)[0] + "."
+
+    # 4. Fallback for free-form text: strip tables and headers, focus on solution sentences
+    lines = []
+    for line in text.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("|") or line_s.startswith("### Scheme Mapping") or "Managing Body" in line_s:
+            continue
+        lines.append(line)
+    clean = "\n".join(lines)
+    clean = re.sub(r"\[CITATION:\d+\]", "", clean)
+    clean = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean)
+    clean = re.sub(r"[*_#`~]", "", clean)
+    clean = re.sub(r"⚠️.*", "", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    sentences = re.split(r"(?<=[।.!?])\s+", clean)
+    meaningful = [
+        s for s in sentences
+        if "matches distinct policy channels" not in s.lower()
+        and "structured below based on official" not in s.lower()
+    ]
+    selected = meaningful if meaningful else sentences
+
+    shortened = ""
+    for s in selected:
+        if len(shortened) + len(s) + 1 <= max_chars:
+            shortened += (" " if shortened else "") + s
+        else:
+            break
+
+    return shortened or clean[:max_chars]
 
 
 # ---------------------------------------------------------------------------
@@ -103,56 +203,76 @@ class SarvamSTT(STTProvider):
 
 
 class SarvamTTS(TTSProvider):
-    """Text-to-speech using Sarvam AI bulbul model, with disk cache."""
+    """Ultra-fast regional text-to-speech using Sarvam AI bulbul model, with RAM & disk caching."""
 
     def __init__(self) -> None:
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(20.0))
         self._cache_dir = Path(settings.tts_cache_dir)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
     def _cache_path(self, text: str, language: str) -> Path:
         key = hashlib.sha256(f"{language}:{text}".encode()).hexdigest()
         return self._cache_dir / f"{key}.wav"
 
-    async def synthesize(self, text: str, language: str) -> bytes:
-        cache_path = self._cache_path(text, language)
-        if cache_path.exists():
-            return cache_path.read_bytes()
-
-        lang_code = _LANG_CODE_MAP.get(language, "en-IN")
-        # Chunk long text (Sarvam typically handles up to ~500 chars per call)
-        chunks = _chunk_text_for_tts(text, max_chars=450)
-        audio_parts = []
-
-        for chunk in chunks:
-            try:
-                resp = await self._client.post(
-                    f"{settings.sarvam_api_base}/text-to-speech",
-                    headers={"api-subscription-key": settings.sarvam_api_key,
-                             "Content-Type": "application/json"},
-                    json={
-                        "inputs": [chunk],
-                        "target_language_code": lang_code,
-                        "speaker": "meera",
-                        "model": settings.sarvam_tts_model,
-                        "enable_preprocessing": True,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                # Sarvam returns base64-encoded audio in audios[0]
-                import base64
-                audio_b64 = data.get("audios", [""])[0]
-                audio_parts.append(base64.b64decode(audio_b64))
-            except Exception as exc:
-                log.error("sarvam_tts_chunk_failed", error=str(exc))
-
-        if not audio_parts:
+    async def synthesize(self, text: str, language: str, clean: bool = True) -> bytes:
+        if not text or not text.strip():
             return b""
 
-        combined = b"".join(audio_parts)
-        cache_path.write_bytes(combined)
-        return combined
+        spoken_text = clean_text_for_speech(text) if clean else text.strip()
+        lang_code = _LANG_CODE_MAP.get(language.lower(), "hi-IN")
+
+        # 1. RAM Cache check (< 1ms)
+        cache_key = f"{lang_code}:{spoken_text}"
+        if cache_key in _TTS_MEM_CACHE:
+            return _TTS_MEM_CACHE[cache_key]
+
+        # 2. Disk Cache check (< 5ms)
+        cache_path = self._cache_path(spoken_text, lang_code)
+        if cache_path.exists():
+            try:
+                data = cache_path.read_bytes()
+                _TTS_MEM_CACHE[cache_key] = data
+                return data
+            except Exception:
+                pass
+
+        # 3. Call Sarvam AI live API
+        try:
+            resp = await self._client.post(
+                f"{settings.sarvam_api_base}/text-to-speech",
+                headers={
+                    "api-subscription-key": settings.sarvam_api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "inputs": [spoken_text],
+                    "target_language_code": lang_code,
+                    "speaker": "priya",
+                    "model": settings.sarvam_tts_model,
+                    "enable_preprocessing": True,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                import base64
+                audios = data.get("audios", [])
+                if audios:
+                    audio_bytes = base64.b64decode(audios[0])
+                    _TTS_MEM_CACHE[cache_key] = audio_bytes
+                    try:
+                        cache_path.write_bytes(audio_bytes)
+                    except Exception:
+                        pass
+                    return audio_bytes
+            else:
+                log.error("sarvam_tts_api_error", status_code=resp.status_code, text=resp.text[:200])
+        except Exception as exc:
+            log.error("sarvam_tts_failed", error=str(exc))
+
+        return b""
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -167,6 +287,10 @@ class SarvamTranslator(TranslatorProvider):
     async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
         if source_lang == target_lang:
             return text
+
+        cache_key = f"{source_lang}:{target_lang}:{text}"
+        if cache_key in _TRANSLATE_MEM_CACHE:
+            return _TRANSLATE_MEM_CACHE[cache_key]
 
         # Protect glossary terms by substituting placeholders
         protected, replacements = _protect_glossary(text)
@@ -194,7 +318,9 @@ class SarvamTranslator(TranslatorProvider):
             return text  # fallback: return original
 
         # Restore glossary terms
-        return _restore_glossary(translated, replacements)
+        result = _restore_glossary(translated, replacements)
+        _TRANSLATE_MEM_CACHE[cache_key] = result
+        return result
 
     async def close(self) -> None:
         await self._client.aclose()

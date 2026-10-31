@@ -26,7 +26,12 @@ class Settings(BaseSettings):
     )
 
     # --- LLM -----------------------------------------------------------
-    anthropic_api_key: str
+    gemini_api_key: Optional[str] = None
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
+    llm_provider: str = "gemini"
+
+    anthropic_api_key: Optional[str] = None
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     anthropic_model_fallback: str = "claude-3-haiku-20240307"
 
@@ -42,8 +47,8 @@ class Settings(BaseSettings):
     # --- Speech / Translation (Sarvam AI) ------------------------------
     sarvam_api_key: str
     sarvam_api_base: str = "https://api.sarvam.ai"
-    sarvam_stt_model: str = "saarika:v2"
-    sarvam_tts_model: str = "bulbul:v1"
+    sarvam_stt_model: str = "saaras:v3"
+    sarvam_tts_model: str = "bulbul:v3"
     sarvam_translate_model: str = "mayura:v1"
 
     # --- Sources -------------------------------------------------------
