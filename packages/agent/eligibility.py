@@ -26,6 +26,10 @@ def _evaluate_criterion(
 
     # Get profile value — use .other dict for custom fields
     profile_val = getattr(profile, field, None)
+    if profile_val is None and field == "education" and profile.occupation:
+        profile_val = profile.occupation
+    elif profile_val is None and field == "occupation" and profile.education:
+        profile_val = profile.education
     if profile_val is None and field == "other":
         profile_val = profile.other.get(str(threshold))
 
@@ -33,10 +37,21 @@ def _evaluate_criterion(
         return "unknown"
 
     try:
+        # Normalize numeric strings with currency signs or commas
+        if op in ("lt", "lte", "gt", "gte", "between"):
+            if isinstance(profile_val, str):
+                profile_val = float(profile_val.replace("₹", "").replace(",", "").strip())
+            else:
+                profile_val = float(profile_val)
+
         if op == "eq":
-            return "pass" if str(profile_val).lower() == str(threshold).lower() else "fail"
+            pval = str(profile_val).lower().strip()
+            tval = str(threshold).lower().strip()
+            return "pass" if (pval == tval or tval in pval or pval in tval) else "fail"
         elif op == "neq":
-            return "pass" if str(profile_val).lower() != str(threshold).lower() else "fail"
+            pval = str(profile_val).lower().strip()
+            tval = str(threshold).lower().strip()
+            return "pass" if pval != tval and tval not in pval else "fail"
         elif op == "lt":
             return "pass" if float(profile_val) < float(threshold) else "fail"
         elif op == "lte":
@@ -46,11 +61,13 @@ def _evaluate_criterion(
         elif op == "gte":
             return "pass" if float(profile_val) >= float(threshold) else "fail"
         elif op == "in":
-            vals = [str(v).lower() for v in threshold] if isinstance(threshold, list) else [str(threshold).lower()]
-            return "pass" if str(profile_val).lower() in vals else "fail"
+            vals = [str(v).lower().strip() for v in threshold] if isinstance(threshold, list) else [str(threshold).lower().strip()]
+            pval = str(profile_val).lower().strip()
+            return "pass" if (pval in vals or any(v in pval or pval in v for v in vals)) else "fail"
         elif op == "not_in":
-            vals = [str(v).lower() for v in threshold] if isinstance(threshold, list) else [str(threshold).lower()]
-            return "pass" if str(profile_val).lower() not in vals else "fail"
+            vals = [str(v).lower().strip() for v in threshold] if isinstance(threshold, list) else [str(threshold).lower().strip()]
+            pval = str(profile_val).lower().strip()
+            return "pass" if (pval not in vals and not any(v in pval for v in vals)) else "fail"
         elif op == "between":
             lo, hi = float(threshold[0]), float(threshold[1])
             return "pass" if lo <= float(profile_val) <= hi else "fail"
