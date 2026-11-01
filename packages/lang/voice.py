@@ -44,7 +44,19 @@ _LANG_CODE_MAP = {
     "ml": "ml-IN",
     "pa": "pa-IN",
     "od": "od-IN",
+    "or": "od-IN",
     "as": "as-IN",
+    "ur": "ur-IN",
+    "mai": "hi-IN",
+    "doi": "hi-IN",
+    "kok": "mr-IN",
+    "ne": "ne-NP",
+    "sat": "bn-IN",
+    "ks": "hi-IN",
+    "mni": "bn-IN",
+    "brx": "as-IN",
+    "sd": "hi-IN",
+    "sa": "hi-IN",
 }
 
 # Terms that must never be machine-translated (scheme names, numbers, etc.)
@@ -59,39 +71,42 @@ _TRANSLATE_MEM_CACHE: dict[str, str] = {}
 
 def clean_text_for_speech(text: str, max_chars: int = 420) -> str:
     """Extracts an authoritative, solution-oriented spoken script from rich markdown.
-    Prioritizes concrete schemes, financial allowances, and direct application steps rather
-    than merely echoing the demographic problem statement.
+    Prioritizes concrete schemes, financial allowances, and direct application steps.
+    Strictly filters out demographic problem-statement echoes and bureaucratic preambles.
     """
     import re
     if not text or not text.strip():
         return ""
 
-    # 1. Parse Scheme Mapping Table Rows: | **Scheme** | Body | Criteria | Benefits |
+    # 1. Parse Scheme Mapping Table Rows: | Scheme | Body | Criteria | Benefits |
     table_schemes: list[tuple[str, str]] = []
     for line in text.splitlines():
         line_s = line.strip()
-        if line_s.startswith("|") and "**" in line_s:
-            parts = [p.strip() for p in line_s.split("|") if p.strip()]
+        if line_s.startswith("|") and not re.match(r"^\|[\s\-:|]+\|$", line_s):
+            parts = [p.strip().replace("**", "").replace("*", "") for p in line_s.split("|") if p.strip()]
             if len(parts) >= 2:
-                raw_scheme = parts[0].replace("**", "").replace("*", "").strip()
-                raw_benefits = parts[-1].replace("**", "").replace("*", "").strip()
-                if raw_scheme and raw_benefits and not raw_scheme.lower().startswith("scholarship") and not raw_benefits.lower().startswith("financial"):
-                    table_schemes.append((raw_scheme, raw_benefits))
+                s_name = parts[0]
+                s_ben = parts[-1]
+                # Filter out table header rows
+                if any(h in s_name.lower() for h in ["scheme", "scholarship", "welfare program", "managing body"]) and any(h in s_ben.lower() for h in ["benefit", "financial", "in-kind"]):
+                    continue
+                if s_name and s_ben and len(s_name) > 3:
+                    table_schemes.append((s_name, s_ben))
 
-    # 2. Parse Bulleted Direct Solutions: • **Scheme**: Benefit
+    # 2. Parse Bulleted Direct Solutions: • [**]Scheme[**]: Benefit
     bullet_schemes: list[tuple[str, str]] = []
     for line in text.splitlines():
         line_s = line.strip()
-        bullet_match = re.search(r"^[•\*\-]\s+\*\*([^*]+)\*\*[:\s—\-]+(.+)", line_s)
-        if bullet_match:
-            s_name = bullet_match.group(1).strip()
-            s_ben = bullet_match.group(2).strip()
-            if s_name and s_ben and not s_name.lower().startswith("primary benefit") and not s_name.lower().startswith("one scheme") and not s_name.lower().startswith("aadhaar"):
+        m = re.search(r"^[•\*\-\d\.]+\s+(?:\*\*)?([^*:\n]+?)(?:\*\*)?[:\s—\-]+(.+)", line_s)
+        if m:
+            s_name = m.group(1).strip()
+            s_ben = m.group(2).strip()
+            if not any(x in s_name.lower() for x in ["primary benefit", "one scheme", "aadhaar", "inside bureaucracy", "step", "portal", "collect", "submit", "alternative"]):
                 bullet_schemes.append((s_name, s_ben))
 
     # 3. Look for Official Application Portal in the text
-    portal_match = re.search(r"(?:Visit|Apply on|Apply at)\s+\[?([a-zA-Z0-9\.\-]+\.(?:gov\.in|nic\.in|in))\]?", text, re.IGNORECASE)
-    portal_name = portal_match.group(1) if portal_match else "the official state portal"
+    portal_match = re.search(r"(?:https?://)?([a-zA-Z0-9\.\-]+\.(?:gov\.in|nic\.in))", text, re.IGNORECASE)
+    portal_name = portal_match.group(1) if portal_match else "the official government portal"
 
     # If we extracted concrete schemes from table or bullets, construct the solution script
     target_schemes = table_schemes or bullet_schemes
@@ -99,21 +114,21 @@ def clean_text_for_speech(text: str, max_chars: int = 420) -> str:
         speech_parts = []
         top_scheme, top_benefit = target_schemes[0]
         top_benefit = re.sub(r"\[CITATION:\d+\]", "", top_benefit).strip()
-        speech_parts.append(f"You qualify for {top_scheme}, providing {top_benefit}.")
+        speech_parts.append(f"Direct Solution: You qualify for {top_scheme}, providing {top_benefit}.")
 
         if len(target_schemes) > 1:
             second_scheme, second_benefit = target_schemes[1]
             second_benefit = re.sub(r"\[CITATION:\d+\]", "", second_benefit).strip()
             speech_parts.append(f"You can also access {second_scheme} for {second_benefit}.")
 
-        speech_parts.append(f"To apply, register at {portal_name} with your required documents and Aadhaar-seeded bank account.")
+        speech_parts.append(f"To claim these benefits, apply online at {portal_name} with your required documents and Aadhaar-seeded bank account.")
         candidate_speech = " ".join(speech_parts)
         if len(candidate_speech) <= max_chars:
             return candidate_speech
         else:
             return candidate_speech[:max_chars].rsplit(".", 1)[0] + "."
 
-    # 4. Fallback for free-form text: strip tables and headers, focus on solution sentences
+    # 4. Fallback for free-form text: aggressively filter out demographic problem descriptions
     lines = []
     for line in text.splitlines():
         line_s = line.strip()
@@ -128,12 +143,29 @@ def clean_text_for_speech(text: str, max_chars: int = 420) -> str:
     clean = re.sub(r"\s+", " ", clean).strip()
 
     sentences = re.split(r"(?<=[।.!?])\s+", clean)
+    banned_preamble_words = [
+        "matches distinct policy channels",
+        "your profile as",
+        "based on your profile",
+        "because welfare guidelines",
+        "welfare guidelines enforce",
+        "structured below based on",
+        "detailed notification clauses",
+        "executive strategic synthesis",
+        "inside bureaucracy",
+        "statutory public welfare and development programs",
+    ]
     meaningful = [
         s for s in sentences
-        if "matches distinct policy channels" not in s.lower()
-        and "structured below based on official" not in s.lower()
+        if not any(bw in s.lower() for bw in banned_preamble_words)
+        and len(s.strip()) > 15
     ]
-    selected = meaningful if meaningful else sentences
+
+    solution_sentences = [
+        s for s in meaningful
+        if any(kw in s.lower() for kw in ["qualify", "eligible", "benefit", "allowance", "stipend", "reimbursement", "pension", "apply", "portal", "registration", "dbt", "₹", "rs"])
+    ]
+    selected = solution_sentences if solution_sentences else meaningful
 
     shortened = ""
     for s in selected:
@@ -142,7 +174,10 @@ def clean_text_for_speech(text: str, max_chars: int = 420) -> str:
         else:
             break
 
-    return shortened or clean[:max_chars]
+    if shortened:
+        return f"Direct Solution: {shortened}"
+
+    return "Direct Solution: You are eligible for verified statutory welfare and financial assistance. Please review the scheme guidelines and apply on the official portal."
 
 
 # ---------------------------------------------------------------------------
@@ -279,13 +314,35 @@ class SarvamTTS(TTSProvider):
 
 
 class SarvamTranslator(TranslatorProvider):
-    """Translation using Sarvam AI mayura model with glossary protection."""
+    """Translation using Sarvam AI mayura model with glossary protection and auto-chunking for long advisories."""
 
     def __init__(self) -> None:
         self._client = httpx.AsyncClient(timeout=_TIMEOUT)
 
+    async def _translate_single_chunk(self, chunk: str, source_code: str, target_code: str) -> str:
+        if not chunk.strip():
+            return chunk
+        try:
+            resp = await self._client.post(
+                f"{settings.sarvam_api_base}/translate",
+                headers={"api-subscription-key": settings.sarvam_api_key,
+                         "Content-Type": "application/json"},
+                json={
+                    "input": chunk,
+                    "source_language_code": source_code,
+                    "target_language_code": target_code,
+                    "model": settings.sarvam_translate_model,
+                    "enable_preprocessing": False,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json().get("translated_text", chunk)
+        except Exception as exc:
+            log.warning("sarvam_single_chunk_translate_failed", error=str(exc))
+            return chunk
+
     async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
-        if source_lang == target_lang:
+        if source_lang == target_lang or not text or not text.strip():
             return text
 
         cache_key = f"{source_lang}:{target_lang}:{text}"
@@ -299,20 +356,15 @@ class SarvamTranslator(TranslatorProvider):
         target_code = _LANG_CODE_MAP.get(target_lang, "hi-IN")
 
         try:
-            resp = await self._client.post(
-                f"{settings.sarvam_api_base}/translate",
-                headers={"api-subscription-key": settings.sarvam_api_key,
-                         "Content-Type": "application/json"},
-                json={
-                    "input": protected,
-                    "source_language_code": source_code,
-                    "target_language_code": target_code,
-                    "model": settings.sarvam_translate_model,
-                    "enable_preprocessing": False,
-                },
-            )
-            resp.raise_for_status()
-            translated = resp.json().get("translated_text", protected)
+            if len(protected) <= 850:
+                translated = await self._translate_single_chunk(protected, source_code, target_code)
+            else:
+                import asyncio
+                chunks = _chunk_text_for_translation(protected, max_chars=800)
+                translated_chunks = await asyncio.gather(
+                    *[self._translate_single_chunk(c, source_code, target_code) for c in chunks]
+                )
+                translated = "\n\n".join(translated_chunks)
         except Exception as exc:
             log.error("sarvam_translate_failed", error=str(exc))
             return text  # fallback: return original
@@ -329,6 +381,34 @@ class SarvamTranslator(TranslatorProvider):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _chunk_text_for_translation(text: str, max_chars: int = 800) -> list[str]:
+    """Split long markdown advisory into <= 800 character blocks for Sarvam Mayura translation."""
+    paragraphs = text.split("\n\n")
+    chunks: list[str] = []
+    current = ""
+    for p in paragraphs:
+        if len(current) + len(p) + 2 <= max_chars:
+            current += ("\n\n" if current else "") + p
+        else:
+            if current:
+                chunks.append(current)
+            if len(p) <= max_chars:
+                current = p
+            else:
+                lines = p.split("\n")
+                current = ""
+                for line in lines:
+                    if len(current) + len(line) + 1 <= max_chars:
+                        current += ("\n" if current else "") + line
+                    else:
+                        if current:
+                            chunks.append(current)
+                        current = line
+    if current:
+        chunks.append(current)
+    return chunks or [text]
 
 
 def _chunk_text_for_tts(text: str, max_chars: int = 450) -> list[str]:

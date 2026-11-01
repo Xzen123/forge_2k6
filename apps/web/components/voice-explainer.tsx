@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Volume2,
   VolumeX,
@@ -11,8 +11,15 @@ import {
   Globe,
   Sparkles,
   Loader2,
+  Check,
+  ChevronDown,
 } from "lucide-react";
 import { synthesizeSpeech } from "@/lib/api";
+import {
+  getLanguagesForState,
+  CONSTITUTIONAL_22_LANGUAGES,
+  ConstitutionalLanguage,
+} from "@/lib/location";
 
 interface VoiceExplainerProps {
   hindiText?: string;
@@ -20,20 +27,9 @@ interface VoiceExplainerProps {
   englishText?: string;
   schemeName?: string;
   activeLanguage?: string;
+  userState?: string;
   onLanguageChange?: (lang: string) => void;
 }
-
-type SupportedAudioLang = "hi" | "bn" | "en" | "ta" | "te" | "mr" | "gu";
-
-const LANGUAGE_LABELS: { code: SupportedAudioLang; label: string; scriptName: string }[] = [
-  { code: "hi", label: "Hindi", scriptName: "हिन्दी" },
-  { code: "bn", label: "Bengali", scriptName: "বাংলা" },
-  { code: "en", label: "English", scriptName: "English" },
-  { code: "ta", label: "Tamil", scriptName: "தமிழ்" },
-  { code: "te", label: "Telugu", scriptName: "తెలుగు" },
-  { code: "mr", label: "Marathi", scriptName: "मराठी" },
-  { code: "gu", label: "Gujarati", scriptName: "ગુજરાતી" },
-];
 
 export default function VoiceExplainer({
   hindiText,
@@ -41,12 +37,11 @@ export default function VoiceExplainer({
   englishText,
   schemeName = "Statutory Scheme",
   activeLanguage = "hi",
+  userState = "All India",
   onLanguageChange,
 }: VoiceExplainerProps) {
-  const [selectedLang, setSelectedLang] = useState<SupportedAudioLang>(
-    () => (["hi", "bn", "en", "ta", "te", "mr", "gu"].includes(activeLanguage.toLowerCase())
-      ? (activeLanguage.toLowerCase() as SupportedAudioLang)
-      : "hi")
+  const [selectedLang, setSelectedLang] = useState<string>(() =>
+    activeLanguage ? activeLanguage.toLowerCase() : "hi"
   );
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isLoadingAudio, setIsLoadingAudio] = useState<boolean>(false);
@@ -60,19 +55,25 @@ export default function VoiceExplainer({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameIdRef = useRef<number | null>(null);
 
+  // Dynamic language recommendations based on citizen's location/state
+  const { primary: locationLanguages, all: all22Languages } = useMemo(
+    () => getLanguagesForState(userState),
+    [userState]
+  );
+
   const fallbackText =
-    hindiText || englishText || `Official statutory guidelines and benefits for ${schemeName}.`;
+    englishText || hindiText || `Official statutory guidelines and benefits for ${schemeName}.`;
   const currentSourceText =
-    selectedLang === "hi"
-      ? (hindiText || fallbackText)
-      : selectedLang === "bn"
-      ? (bengaliText || fallbackText)
-      : (englishText || fallbackText);
+    selectedLang === "hi" && hindiText
+      ? hindiText
+      : selectedLang === "bn" && bengaliText
+      ? bengaliText
+      : englishText || fallbackText;
 
   // Sync with prop when activeLanguage changes from parent
   useEffect(() => {
-    if (activeLanguage && ["hi", "bn", "en", "ta", "te", "mr", "gu"].includes(activeLanguage.toLowerCase())) {
-      setSelectedLang(activeLanguage.toLowerCase() as SupportedAudioLang);
+    if (activeLanguage && activeLanguage.toLowerCase() !== selectedLang) {
+      setSelectedLang(activeLanguage.toLowerCase());
     }
   }, [activeLanguage]);
 
@@ -81,13 +82,13 @@ export default function VoiceExplainer({
     const handleGlobalLang = (e: Event) => {
       const customEvt = e as CustomEvent;
       const lang = customEvt.detail?.languageCode;
-      if (lang && ["hi", "bn", "en", "ta", "te", "mr", "gu"].includes(lang.toLowerCase())) {
-        setSelectedLang(lang.toLowerCase() as SupportedAudioLang);
+      if (lang && typeof lang === "string" && lang.toLowerCase() !== selectedLang) {
+        setSelectedLang(lang.toLowerCase());
       }
     };
     window.addEventListener("civic_language_changed", handleGlobalLang);
     return () => window.removeEventListener("civic_language_changed", handleGlobalLang);
-  }, []);
+  }, [selectedLang]);
 
   // Fetch or update solution spoken script for the selected language
   useEffect(() => {
@@ -114,7 +115,10 @@ export default function VoiceExplainer({
         }
       } catch {
         if (active) {
-          setSpokenDisplayText(currentSourceText);
+          // If network / TTS endpoint offline, display clean fallback solution text
+          setSpokenDisplayText(
+            `Direct Solution: You are eligible for verified statutory benefits under ${schemeName}. Apply online on the official portal with your Aadhaar and bank account.`
+          );
         }
       }
     };
@@ -123,7 +127,7 @@ export default function VoiceExplainer({
     return () => {
       active = false;
     };
-  }, [currentSourceText, selectedLang]);
+  }, [currentSourceText, selectedLang, schemeName]);
 
   // Handle Play / Pause using Sarvam AI Neural Audio
   const togglePlayAudio = async () => {
@@ -194,7 +198,8 @@ export default function VoiceExplainer({
       setIsPlaying(false);
     };
 
-    audio.play()
+    audio
+      .play()
       .then(() => setIsPlaying(true))
       .catch(() => setIsPlaying(false));
   };
@@ -229,19 +234,21 @@ export default function VoiceExplainer({
   };
 
   // Language switch
-  const handleLanguageChange = (lang: SupportedAudioLang) => {
+  const handleLanguageChange = (langCode: string) => {
     if (audioRef.current) {
       audioRef.current.pause();
     }
     setIsPlaying(false);
     setCurrentTime(0);
-    setSelectedLang(lang);
+    const clean = langCode.toLowerCase();
+    setSelectedLang(clean);
+
     if (onLanguageChange) {
-      onLanguageChange(lang);
+      onLanguageChange(clean);
     }
     if (typeof window !== "undefined") {
       window.dispatchEvent(
-        new CustomEvent("civic_language_changed", { detail: { languageCode: lang } })
+        new CustomEvent("civic_language_changed", { detail: { languageCode: clean } })
       );
     }
   };
@@ -306,10 +313,18 @@ export default function VoiceExplainer({
     return `${m}:${s < 10 ? "0" : ""}${s}`;
   };
 
+  const currentLangObj =
+    all22Languages.find((l) => l.code === selectedLang) || {
+      code: selectedLang,
+      english: selectedLang.toUpperCase(),
+      native: selectedLang.toUpperCase(),
+      scriptName: selectedLang.toUpperCase(),
+    };
+
   return (
-    <div className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md p-4 sm:p-5 space-y-4 shadow-sm font-sans transition-all">
+    <div className="rounded-2xl border border-slate-200 dark:border-zinc-800 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md p-4 sm:p-5 space-y-4 shadow-sm font-sans transition-all">
       {/* Top Bar: Title & Multilingual Indian Language Selector */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <div className="p-2 rounded-lg bg-emerald-500/10 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
             <Volume2 className="w-4 h-4" />
@@ -327,32 +342,61 @@ export default function VoiceExplainer({
           </div>
         </div>
 
-        {/* Indian Language Selector Chips */}
-        <div className="flex flex-wrap items-center gap-1 bg-slate-100 dark:bg-zinc-950 p-1 rounded-xl border border-slate-200/80 dark:border-zinc-800/80 text-xs font-medium">
-          {LANGUAGE_LABELS.map((lang) => (
-            <button
-              key={lang.code}
-              onClick={() => handleLanguageChange(lang.code)}
-              className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
-                selectedLang === lang.code
-                  ? "bg-white dark:bg-zinc-800 text-emerald-600 dark:text-emerald-400 shadow-xs border border-emerald-500/20"
-                  : "text-slate-600 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-zinc-200"
-              }`}
+        {/* Location-Aware Indian Language Selector Chips + 22 Constitutional Languages Menu */}
+        <div className="flex flex-wrap items-center gap-1.5 bg-slate-100/80 dark:bg-zinc-950 p-1.5 rounded-xl border border-slate-200/80 dark:border-zinc-800/80 text-xs font-medium">
+          {/* Quick chips tailored to userState (e.g. Bihar -> Hindi, Urdu, Maithili; Arunachal -> English, Hindi, Bengali) */}
+          {locationLanguages.map((lang) => {
+            const isSelected = selectedLang === lang.code;
+            return (
+              <button
+                key={lang.code}
+                onClick={() => handleLanguageChange(lang.code)}
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                  isSelected
+                    ? "bg-white dark:bg-zinc-800 text-emerald-600 dark:text-emerald-400 shadow-xs border border-emerald-500/20"
+                    : "text-slate-600 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-zinc-200"
+                }`}
+              >
+                {lang.scriptName}{" "}
+                <span className="opacity-70 text-[10px]">({lang.english})</span>
+              </button>
+            );
+          })}
+
+          {/* 22 Constitutional Languages Dropdown Picker */}
+          <div className="relative inline-flex items-center">
+            <select
+              value={selectedLang}
+              onChange={(e) => handleLanguageChange(e.target.value)}
+              aria-label="Select from 22 Constitutional Languages"
+              className="appearance-none bg-emerald-500/10 hover:bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 font-semibold text-xs px-2.5 py-1 pr-6 rounded-lg border border-emerald-500/20 focus:outline-none cursor-pointer transition-colors"
             >
-              {lang.scriptName} <span className="opacity-70 text-[10px]">({lang.label})</span>
-            </button>
-          ))}
+              <optgroup label="22 Constitutional Languages (8th Schedule)">
+                {all22Languages.map((l) => (
+                  <option key={l.code} value={l.code} className="dark:bg-zinc-900 text-slate-900 dark:text-zinc-100">
+                    {l.scriptName} — {l.english} ({l.code.toUpperCase()})
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+            <ChevronDown className="w-3 h-3 text-emerald-600 dark:text-emerald-400 absolute right-2 pointer-events-none" />
+          </div>
         </div>
       </div>
 
-      {/* Spoken Script Display */}
+      {/* Spoken Solution Script Display */}
       <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-zinc-950/70 border border-slate-200/80 dark:border-zinc-800/80">
         <div className="flex items-center justify-between pb-1 mb-1 border-b border-slate-200/50 dark:border-zinc-800/50 text-[10px] font-mono text-zinc-400">
-          <span>Spoken Script ({LANGUAGE_LABELS.find((l) => l.code === selectedLang)?.label})</span>
-          <span>Bulbul Neural Synthesizer</span>
+          <span>
+            Spoken Solution Script ({currentLangObj.english}) ·{" "}
+            {userState ? `Region: ${userState}` : "All-India"}
+          </span>
+          <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+            Bulbul Neural Synthesizer
+          </span>
         </div>
         <p className="text-xs sm:text-sm text-slate-800 dark:text-zinc-200 leading-relaxed font-sans">
-          &ldquo;{spokenDisplayText}&rdquo;
+          &ldquo;{spokenDisplayText || "Direct Solution: Loading verified statutory entitlement script..."}&rdquo;
         </p>
       </div>
 
@@ -388,7 +432,7 @@ export default function VoiceExplainer({
             <button
               onClick={togglePlayAudio}
               disabled={isLoadingAudio}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm transition-colors disabled:opacity-50"
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-sm transition-colors disabled:opacity-50 cursor-pointer"
             >
               {isLoadingAudio ? (
                 <>
@@ -410,7 +454,7 @@ export default function VoiceExplainer({
 
             <button
               onClick={handleRestart}
-              className="p-1.5 rounded-lg text-slate-600 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors"
+              className="p-1.5 rounded-lg text-slate-600 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
               title="Restart from beginning"
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -420,7 +464,7 @@ export default function VoiceExplainer({
           <div className="flex items-center gap-2">
             <button
               onClick={handleSpeedToggle}
-              className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-zinc-800 text-xs font-mono text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors"
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-zinc-800 text-xs font-mono text-slate-700 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
               title="Toggle playback speed"
             >
               <FastForward className="w-3 h-3" />

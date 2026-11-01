@@ -342,10 +342,9 @@ def _build_executive_civic_advisory(state: AgentState) -> tuple[str, list[Claim]
         solution_lines.append(f"**Statutory Entitlement Advisory**: Your profile matches social security and direct benefit transfer welfare channels.")
 
     synthesis = (
-        f"Based on your profile as a {f'{p.age}-year-old ' if p.age else ''}{gender_str}{cat_str}{occ_str} {state_str} {income_str}, "
-        f"here is your verified statutory solution:\n\n"
+        "### 1. Verified Direct Solution & Entitlement Summary\n"
         + "\n".join(solution_lines) + "\n\n"
-        f"Detailed notification clauses, disbursement criteria, and the step-by-step application procedure are documented below."
+        f"**Statutory Applicability**: Verified for {gender_str}{cat_str}{occ_str} {state_str} {income_str} under official government gazette notifications. Detailed disbursement criteria and action plan are provided below."
     )
     sections.append(synthesis)
 

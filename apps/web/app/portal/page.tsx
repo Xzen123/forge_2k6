@@ -44,7 +44,11 @@ import {
   translateText,
 } from "@/lib/api";
 import { getTranslation } from "@/lib/i18n";
-import { detectUserLocation, getRecommendedLanguageForState } from "@/lib/location";
+import {
+  detectUserLocation,
+  getRecommendedLanguageForState,
+  CONSTITUTIONAL_22_LANGUAGES,
+} from "@/lib/location";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -180,15 +184,47 @@ function PortalContent() {
     return () => window.removeEventListener("civic_language_changed", handleGlobalLang);
   }, []);
 
-  // Translate finalAnswer dynamically whenever language changes
+  // Translate finalAnswer dynamically whenever language changes (both markdown and claims)
   useEffect(() => {
     if (!finalAnswer || !finalAnswer.text) return;
     let active = true;
-    if (finalAnswer.language && finalAnswer.language.toLowerCase() !== language.toLowerCase()) {
-      translateText(finalAnswer.text, language, finalAnswer.language).then((res) => {
-        if (active && res.translated_text && res.translated_text.trim()) {
+    const tgtLang = language.toLowerCase();
+    const srcLang = (finalAnswer.language || "en").toLowerCase();
+
+    if (tgtLang !== srcLang) {
+      // 1. Translate the executive advisory markdown text
+      translateText(finalAnswer.text, tgtLang, srcLang).then(async (res) => {
+        if (!active || !res.translated_text || !res.translated_text.trim()) return;
+
+        // 2. Also translate the claim strings concurrently
+        let translatedClaims = finalAnswer.claims;
+        if (finalAnswer.claims && finalAnswer.claims.length > 0) {
+          try {
+            translatedClaims = await Promise.all(
+              finalAnswer.claims.map(async (c) => {
+                try {
+                  const cRes = await translateText(c.text, tgtLang, srcLang);
+                  return { ...c, text: cRes.translated_text || c.text };
+                } catch {
+                  return c;
+                }
+              })
+            );
+          } catch {
+            translatedClaims = finalAnswer.claims;
+          }
+        }
+
+        if (active) {
           setFinalAnswer((prev) =>
-            prev ? { ...prev, text: res.translated_text, language } : null
+            prev
+              ? {
+                  ...prev,
+                  text: res.translated_text,
+                  claims: translatedClaims,
+                  language: tgtLang,
+                }
+              : null
           );
         }
       });
@@ -196,7 +232,7 @@ function PortalContent() {
     return () => {
       active = false;
     };
-  }, [language]);
+  }, [language, finalAnswer?.language]);
 
   // Sync activePillar when URL search param ?module= changes
   useEffect(() => {
@@ -660,18 +696,11 @@ function PortalContent() {
               className="bg-transparent text-xs font-semibold px-2 py-0.5 text-slate-800 dark:text-zinc-200 focus:outline-none cursor-pointer"
               aria-label="Select Interface & Speech Language"
             >
-              <option value="en" className="dark:bg-zinc-900">English (EN)</option>
-              <option value="hi" className="dark:bg-zinc-900">हिन्दी (HI)</option>
-              <option value="bn" className="dark:bg-zinc-900">বাংলা (BN)</option>
-              <option value="ta" className="dark:bg-zinc-900">தமிழ் (TA)</option>
-              <option value="te" className="dark:bg-zinc-900">తెలుగు (TE)</option>
-              <option value="mr" className="dark:bg-zinc-900">मराठी (MR)</option>
-              <option value="gu" className="dark:bg-zinc-900">ગુજરાતી (GU)</option>
-              <option value="kn" className="dark:bg-zinc-900">ಕನ್ನಡ (KN)</option>
-              <option value="ml" className="dark:bg-zinc-900">മലയാളം (ML)</option>
-              <option value="pa" className="dark:bg-zinc-900">ਪੰਜਾਬੀ (PA)</option>
-              <option value="or" className="dark:bg-zinc-900">ଓଡ଼ିଆ (OR)</option>
-              <option value="ur" className="dark:bg-zinc-900">اردو (UR)</option>
+              {CONSTITUTIONAL_22_LANGUAGES.map((l) => (
+                <option key={l.code} value={l.code} className="dark:bg-zinc-900">
+                  {l.scriptName} ({l.english})
+                </option>
+              ))}
             </select>
           </div>
 
@@ -924,9 +953,11 @@ function PortalContent() {
                 {/* Voice Explainer Visualizer Component */}
                 <div className="pt-6">
                   <VoiceExplainer
-                    hindiText={finalAnswer.text}
+                    englishText={finalAnswer.text}
+                    hindiText={language === "hi" ? finalAnswer.text : undefined}
                     schemeName={finalAnswer.claims[0]?.text || "Civic Scheme"}
                     activeLanguage={language}
+                    userState={citizenProfile.state !== "-" ? citizenProfile.state : (detectedLocationState || undefined)}
                     onLanguageChange={(l) => setLanguage(l)}
                   />
                 </div>
