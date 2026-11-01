@@ -119,3 +119,4 @@ echo ""
 echo "To check container logs:"
 echo "  sudo docker compose -f infra/docker-compose.yml logs -f"
 echo "============================================================"
+
