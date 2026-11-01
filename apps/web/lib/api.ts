@@ -1,6 +1,9 @@
 // API client for Civic Pulse backend
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window !== "undefined" && window.location.hostname !== "localhost"
+    ? "/api/backend"
+    : "http://localhost:8001");
 
 export type TraceEventData = {
   step: string;
