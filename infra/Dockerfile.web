@@ -1,0 +1,32 @@
+# Production Dockerfile for Next.js Web App
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy root and package dependency manifests
+COPY apps/web/package*.json ./
+RUN npm ci
+
+# Copy web source code
+COPY apps/web ./
+
+# Build Next.js in standalone mode
+ARG NEXT_PUBLIC_API_URL=""
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+RUN npm run build
+
+# Runner stage (minimal Alpine container)
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# Copy necessary standalone build artifacts
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
