@@ -15,4 +15,6 @@ apps/web/.next/
 /tmp/
 *.log
 tts_cache/
+.agent/
+.agents/
 .DS_Store
